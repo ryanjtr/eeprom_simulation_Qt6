@@ -1,0 +1,438 @@
+import sys
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
+                             QPushButton, QLineEdit, QTextEdit, QLabel, QCheckBox, QTabWidget,
+                             QTableWidget, QTableWidgetItem)
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, QByteArray,Qt
+from PyQt6.QtGui import QColor, QBrush,QIcon
+import time
+import serial
+import serial.tools.list_ports
+
+class SerialReader(QThread):
+    data_received = pyqtSignal(bytes)
+
+    def __init__(self, serial_port):
+        super().__init__()
+        self.serial_port = serial_port
+        self.running = True
+
+    def run(self):
+        while self.running:
+            if self.serial_port.in_waiting > 0:
+                data = self.serial_port.read(self.serial_port.in_waiting)
+                self.data_received.emit(data)
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+class USBCommunicationApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        
+        self.setWindowTitle("USB CDC Communication")
+        self.setGeometry(0, 0, 600, 500)
+        self.setStyleSheet('background-color:#FFFDF0')
+        self.setWindowOpacity(1)
+        self.setWindowIcon(QIcon('practice_python/bwolf.png'))
+        self.state = 1
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.run_state_machine)
+        self.timer.start(1000)
+        
+        # Khởi tạo reset_timer
+        self.reset_timer = QTimer()
+        self.reset_timer.setInterval(1000)  # 1 second interval
+        self.reset_timer.timeout.connect(self.reset_state)
+        
+        # Main layout
+        self.layout = QVBoxLayout()
+
+        # Tab widget
+        self.tab_widget = QTabWidget()
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
+        self.layout.addWidget(self.tab_widget)
+
+        # Add tabs
+        self.communication_tab = QWidget()
+        self.eeprom_tab = QWidget()
+        self.tab_widget.addTab(self.communication_tab, "USB Communication")
+        self.tab_widget.addTab(self.eeprom_tab, "I2C EEPROM AT24C02")
+
+        # Setup communication tab
+        self.setup_communication_tab()
+        
+        # Setup EEPROM tab
+        self.setup_eeprom_tab()
+
+        self.setLayout(self.layout)
+        
+        self.serial_port = None
+        self.serial_reader = None
+
+        # Initial state
+        self.initial_state = True
+
+    def setup_communication_tab(self):
+        # Layout for communication tab
+        self.comm_layout = QVBoxLayout(self.communication_tab)
+
+        # Port selection layout
+        self.port_layout = QHBoxLayout()
+        self.port_label = QLabel("Select Port:")
+        self.port_combobox = QComboBox()
+        self.populate_ports()
+        self.port_layout.addWidget(self.port_label)
+        self.port_layout.addWidget(self.port_combobox)
+        self.comm_layout.addLayout(self.port_layout)
+        
+        # Baud rate selection layout
+        self.baudrate_layout = QHBoxLayout()
+        self.baudrate_label = QLabel("Select Baudrate:")
+        self.baudrate_combobox = QComboBox()
+        self.populate_baudrates()
+        self.baudrate_layout.addWidget(self.baudrate_label)
+        self.baudrate_layout.addWidget(self.baudrate_combobox)
+        self.comm_layout.addLayout(self.baudrate_layout)
+        
+        # Connect/Disconnect buttons layout
+        self.connection_layout = QHBoxLayout()
+        self.connect_button = QPushButton("Connect")
+        self.connect_button.clicked.connect(self.connect_to_port)
+        self.disconnect_button = QPushButton("Disconnect")
+        self.disconnect_button.clicked.connect(self.disconnect_from_port)
+        self.connection_layout.addWidget(self.connect_button)
+        self.connection_layout.addWidget(self.disconnect_button)
+        self.comm_layout.addLayout(self.connection_layout)
+        
+        # Data input layout
+        self.data_layout = QHBoxLayout()
+        self.data_input = QLineEdit()
+        self.data_input.setPlaceholderText("Enter data to send")
+        self.send_button = QPushButton("Send Data")
+        self.send_button.clicked.connect(self.send_data)
+        self.hex_checkbox = QCheckBox("Send as HEX")
+        self.data_layout.addWidget(self.data_input)
+        self.data_layout.addWidget(self.send_button)
+        self.data_layout.addWidget(self.hex_checkbox)
+        self.comm_layout.addLayout(self.data_layout)
+        
+        # Receive text and clear button layout
+        self.receive_layout = QVBoxLayout()
+        self.receive_text = QTextEdit()
+        self.receive_text.setReadOnly(True)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.clicked.connect(self.clear_receive_text)
+        self.receive_layout.addWidget(self.receive_text)
+        self.receive_layout.addWidget(self.clear_button)
+        self.comm_layout.addLayout(self.receive_layout)
+
+    def setup_eeprom_tab(self):
+            self.eeprom_layout = QVBoxLayout(self.eeprom_tab)
+
+            # Add Address Table
+            self.address_table = QTableWidget(16, 18)
+            self.address_table.setHorizontalHeaderLabels(
+                ["Address", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F", "ASCII"]
+            )
+            self.populate_table()
+            self.adjust_column_width()
+            self.address_table.itemChanged.connect(self.update_item_and_ascii)
+            self.eeprom_layout.addWidget(self.address_table)
+
+
+            # Điều chỉnh chiều rộng các cột sao cho vừa đủ
+            self.address_table.setColumnWidth(0, 80)  # Cột Address
+            for i in range(1, 17):
+                self.address_table.setColumnWidth(i, 78)  # Cột từ 0 đến F
+            self.address_table.setColumnWidth(17, 170)  # Cột ASCII
+
+            # Điều chỉnh chiều cao bảng sao cho hiển thị hết tất cả các hàng
+            # total_height = self.address_table.rowCount() * self.address_table.rowHeight(0)
+            total_height = 33 * self.address_table.rowCount()
+            self.address_table.setFixedHeight(total_height)  # Đảm bảo đủ chiều cao để hiển thị tất cả các hàng
+
+            # Điều chỉnh chiều rộng bảng để hiển thị tất cả các cột
+            total_width = sum(self.address_table.columnWidth(i) for i in range(18))  # Tính tổng chiều rộng của tất cả các cột
+            self.address_table.setFixedWidth(total_width)  # Đảm bảo bảng có đủ chiều rộng để hiển thị tất cả cột
+
+            # Add USB CDC communication text area
+            self.usb_comm_text = QTextEdit()
+            # self.usb_comm_text.setMinimumHeight(100)
+            self.usb_comm_text.setReadOnly(True)
+            self.clear_i2c_button = QPushButton("Clear")
+            self.clear_i2c_button.clicked.connect(self.clear_i2c_text)
+            self.eeprom_layout.addWidget(self.clear_i2c_button)
+            self.eeprom_layout.addWidget(self.usb_comm_text)
+
+    def populate_table(self):
+        for i in range(16):
+            address = i * 0x10
+            addr_item = QTableWidgetItem(f"0x{address:02X}")
+            addr_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.address_table.setItem(i, 0, addr_item)
+            
+            ascii_str = ""
+            for j in range(1, 17):
+                value_item = QTableWidgetItem("0xFF")
+                self.address_table.setItem(i, j, value_item)
+                ascii_str += '.'
+
+            # Cập nhật cột ASCII
+            ascii_item = QTableWidgetItem(ascii_str)
+            ascii_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.address_table.setItem(i, 17, ascii_item)
+
+    def adjust_column_width(self):
+        self.address_table.setColumnWidth(0, 80)
+        for i in range(1, 17):
+            self.address_table.setColumnWidth(i, 45)
+        self.address_table.setColumnWidth(17, 120)
+
+    def update_item_and_ascii(self, item):
+        row = item.row()
+        col = item.column()
+
+        if 1 <= col <= 16:
+            text = item.text().strip()
+            if not text.startswith("0x"):
+                try:
+                    int(text, 16)
+                    text = f"0x{text.upper()}"
+                    item.setText(text)
+                except ValueError:
+                    item.setText("0xFF")
+
+            # Cập nhật cột ASCII
+            ascii_str = ""
+            for j in range(1, 17):
+                value_item = self.address_table.item(row, j)
+                if value_item:
+                    try:
+                        hex_value = int(value_item.text(), 16)
+                        ascii_str += chr(hex_value) if 32 <= hex_value <= 126 else '.'
+                    except ValueError:
+                        ascii_str += '.'
+
+            self.address_table.item(row, 17).setText(ascii_str)
+
+
+    def update_value(self, address, value):
+        # Chuyển đổi địa chỉ từ 0x27 thành chỉ số hàng
+        row = address // 0x10  # Tính toán hàng từ địa chỉ (mỗi hàng có kích thước 16 byte)
+        col = address % 0x10    # Cột tương ứng với byte trong địa chỉ
+
+        # Cập nhật giá trị vào ô tương ứng
+        value_item = QTableWidgetItem(f"0x{value:02X}")
+        self.address_table.setItem(row, col + 1, value_item)  # Cột +1 vì cột 0 là cho địa chỉ
+        value_item.setForeground(QColor('red'))
+        # Cập nhật lại cột ASCII
+        self.update_ascii_column(row)
+
+    def update_ascii_column(self, row):
+        # Cập nhật cột ASCII khi có sự thay đổi trong các giá trị hex
+        ascii_str = ""
+        for j in range(1, 17):
+            value_item = self.address_table.item(row, j)
+            if value_item:
+                try:
+                    hex_value = int(value_item.text(), 16)
+                    ascii_str += chr(hex_value) if 32 <= hex_value <= 126 else '.'
+                except ValueError:
+                    ascii_str += '.'
+
+        self.address_table.item(row, 17).setText(ascii_str)
+
+
+    def populate_ports(self):
+        self.port_combobox.clear()
+        for i in range(7, 21):
+            self.port_combobox.addItem(f"COM{i}")
+    
+    def populate_baudrates(self):
+        self.baudrate_combobox.clear()
+        baudrates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
+        for baudrate in baudrates:
+            self.baudrate_combobox.addItem(str(baudrate))
+        self.baudrate_combobox.setCurrentText("115200")
+    
+    def connect_to_port(self):
+        port_name = self.port_combobox.currentText()
+        baudrate = int(self.baudrate_combobox.currentText())
+        if port_name:
+            try:
+                self.serial_port = serial.Serial(port_name, baudrate, timeout=1)
+                self.receive_text.append(f"Connected to {port_name} at {baudrate} baud rate")
+                self.serial_reader = SerialReader(self.serial_port)
+                self.serial_reader.data_received.connect(self.update_receive_text)
+                self.serial_reader.start()
+            except Exception as e:
+                self.receive_text.append(f"Failed to connect: {e}")
+    
+    def disconnect_from_port(self):
+        if self.serial_reader:
+            self.serial_reader.stop()
+            self.serial_reader = None
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.close()
+            self.receive_text.append("Disconnected")
+    
+    def send_data(self):
+        if self.serial_port and self.serial_port.is_open:
+            data = self.data_input.text()
+            if data:
+                if self.hex_checkbox.isChecked():
+                    try:
+                        data_bytes = bytes.fromhex(data)
+                    except ValueError:
+                        self.receive_text.append("Invalid HEX input")
+                        return
+                else:
+                    data_bytes = data.encode()
+                
+                self.serial_port.write(data_bytes)
+                self.receive_text.append(f"Sent: {data} ")
+                self.data_input.clear()
+
+    def update_receive_text(self, data: QByteArray):
+        hex_data = data.hex().upper()
+        
+        formatted_hex_data = ' '.join([hex_data[i:i+2] for i in range(0, len(hex_data), 2)])
+
+        self.receive_text.append(f"Received: {formatted_hex_data}")
+        if self.usb_comm_text:
+            self.usb_comm_text.append(f"Received: {formatted_hex_data}")
+
+        self.data_list = list(data)
+
+    def run_state_machine(self):
+
+            # Check I2C
+        def check_data(data_list):              
+            if len(data_list) == 0 or data_list[0] != 0x01:
+                return False
+            return True
+        
+        if self.tab_widget.currentIndex() == 1 and hasattr(self, 'data_list') and check_data(self.data_list):
+            data_list = self.data_list
+
+            if self.state == 1:
+                send_data = bytes([0x01, 0x01, 0x03,0x68, 0x55, 0x56])
+                self.serial_port.write(send_data)
+                self.usb_comm_text.append(f"Sent: {' '. join(format(b, '02X') for b in send_data)}")
+
+                if check_data(data_list):
+                    if data_list[1] == 0x04:
+                        self.state = 4
+                        
+
+            elif self.state == 2:
+                if check_data(data_list):
+                    if data_list[1] == 0x02 and len(data_list) > 3:
+                        self.usb_comm_text.append(f"Write state")
+                        address = data_list[2]
+                        self.usb_comm_text.append(f"Receive Address: {address:02X}")
+
+                        for i in range(3, len(data_list)):
+                            if address > 0xFF:
+                                address = 0x00  # Wrap around to address 0x00 if greater than 0xFF
+
+                            value = data_list[i]
+
+                            self.update_value(address=address,value=value)
+                            address += 1
+
+                        self.usb_comm_text.append(f"Updated table with received data")
+                        data_list[1] = 0x04
+                        self.state = 4
+
+            
+            elif self.state == 3:
+                if check_data(data_list):
+                    if data_list[1] == 0x03 and len(data_list) > 2:
+                        self.usb_comm_text.append(f"Read state")
+                        address = data_list[2]
+                        send_data = bytearray()
+                        while address <= 0xFF:
+                            item = self.table_widget.item(address, 1)
+                            if item:
+                                value = int(item.text(), 16)
+                                send_data.append(value)
+                            else:
+                                send_data.append(0x00)
+                            address += 1
+
+                        self.serial_port.write(send_data)
+                        self.usb_comm_text.append(f"Sent: {' '.join(format(b, '02X') for b in send_data)}")
+                        data_list[1] = 0x04
+                        self.state = 4
+
+                        self.usb_comm_text.append(f"Read done")
+
+            elif self.state == 4:
+                self.usb_comm_text.append(f"Wait state")
+
+                if check_data(data_list):
+                    if data_list[1] == 0x01:
+                        self.state = 1
+                    elif data_list[1] == 0x02:
+                        self.state = 2
+                    elif data_list[1] == 0x03:
+                        self.state = 3
+       
+    def clear_receive_text(self):
+        self.receive_text.clear()
+    
+    def clear_i2c_text(self):
+        self.usb_comm_text.clear()
+        
+    def on_tab_changed(self, index):
+        if index == 1:  # If the I2C EEPROM tab is selected
+            self.reset_timer.stop()
+            self.initial_state = True
+    
+    def reset_state(self):
+        if self.serial_port.in_waiting:
+            data = self.serial_port.read(self.serial_port.in_waiting)
+            self.update_receive_text(data)
+
+    def search_address(self):
+        search_address = self.search_input.text().strip().upper()
+
+        # Kiểm tra xem địa chỉ có hợp lệ (2 ký tự hexadecimal) hay không
+        if len(search_address) != 2:
+            self.usb_comm_text.append("Invalid address. Please enter a valid 2-character hexadecimal address.")
+            return
+
+        try:
+            address_int = int(search_address, 16)
+        except ValueError:
+            self.usb_comm_text.append("Invalid address. Please enter a valid hexadecimal address.")
+            return
+
+        found = False
+        for row in range(self.table_widget.rowCount()):
+            address_item = self.table_widget.item(row, 0)
+        
+            # Tìm kiếm địa chỉ trong bảng
+            if address_item and address_item.text() == search_address:
+                self.table_widget.scrollToItem(address_item)
+                address_item.setSelected(True)
+                found = True
+
+                # Lấy dữ liệu tại địa chỉ tìm được
+                data_item = self.table_widget.item(row, 1)
+                if data_item:
+                    data_value = data_item.text()
+                    self.usb_comm_text.append(f"Data at address {search_address}: {data_value}")
+                break
+
+        if not found:
+            self.usb_comm_text.append(f"Address {search_address} not found")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = USBCommunicationApp()
+    window.show()
+    sys.exit(app.exec())
