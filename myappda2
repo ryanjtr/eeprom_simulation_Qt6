@@ -32,9 +32,7 @@ class USBCommunicationApp(QWidget):
         
         self.setWindowTitle("USB CDC Communication")
         self.setGeometry(0, 0, 600, 500)
-        self.setStyleSheet('background-color:#FFFDF0')
-        self.setWindowOpacity(1)
-        self.setWindowIcon(QIcon('practice_python/bwolf.png'))
+        self.setWindowIcon(QIcon('../app_eeprom_simulate/bwolf.png'))
         self.state = 1
 
         self.timer = QTimer(self)
@@ -159,7 +157,7 @@ class USBCommunicationApp(QWidget):
 
             # Add USB CDC communication text area
             self.usb_comm_text = QTextEdit()
-            # self.usb_comm_text.setMinimumHeight(100)
+            self.usb_comm_text.setMinimumHeight(150)
             self.usb_comm_text.setReadOnly(True)
             self.clear_i2c_button = QPushButton("Clear")
             self.clear_i2c_button.clicked.connect(self.clear_i2c_text)
@@ -332,7 +330,7 @@ class USBCommunicationApp(QWidget):
                     if data_list[1] == 0x02 and len(data_list) > 3:
                         self.usb_comm_text.append(f"Write state")
                         address = data_list[2]
-                        self.usb_comm_text.append(f"Receive Address: {address:02X}")
+                        self.usb_comm_text.append(f"Receive Address: 0x{address:02X}")
 
                         for i in range(3, len(data_list)):
                             if address > 0xFF:
